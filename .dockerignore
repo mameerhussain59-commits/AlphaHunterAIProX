@@ -1,0 +1,7 @@
+__pycache__
+*.pyc
+*.db
+node_modules
+.git
+frontend/build
+backend/static
