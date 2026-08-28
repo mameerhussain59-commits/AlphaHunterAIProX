@@ -1,6 +1,14 @@
 import React, { useState, useEffect, useCallback } from "react";
 
+// Same-origin in production (backend serves this build from /static).
+// In local dev (npm start on :3000), point at the uvicorn server on :8000.
 const API_BASE = window.location.port === "3000" ? "http://localhost:8000" : "";
+
+function pumpBadgeStyle(level) {
+  if (level === "high") return { background: "#1db95422", color: "#1db954", border: "1px solid #1db954" };
+  if (level === "medium") return { background: "#e0a80822", color: "#e0a808", border: "1px solid #e0a808" };
+  return { background: "#8b949e22", color: "#8b949e", border: "1px solid #8b949e" };
+}
 
 function scoreColor(score) {
   if (score >= 75) return "#1db954";
@@ -73,6 +81,21 @@ export default function App() {
         <a href={`${API_BASE}/api/export/csv`} style={styles.linkButton}>
           Export CSV
         </a>
+        <button
+          onClick={() => {
+            const rank = { high: 0, medium: 1, low: 2 };
+            setResults((prev) =>
+              [...prev].sort((a, b) => {
+                const la = a.breakdown?.early_pump_signal?.early_pump_probability || "low";
+                const lb = b.breakdown?.early_pump_signal?.early_pump_probability || "low";
+                return rank[la] - rank[lb];
+              })
+            );
+          }}
+          style={styles.linkButton}
+        >
+          Sort by Pump Signal
+        </button>
       </div>
 
       {error && <div style={styles.error}>{error}</div>}
@@ -90,6 +113,7 @@ export default function App() {
             <tr>
               <th style={styles.th}>Symbol</th>
               <th style={styles.th}>Score</th>
+              <th style={styles.th}>Pump Signal</th>
               <th style={styles.th}>Monthly RSI</th>
               <th style={styles.th}>Entry</th>
               <th style={styles.th}>SL</th>
@@ -102,7 +126,7 @@ export default function App() {
           <tbody>
             {results.length === 0 && (
               <tr>
-                <td colSpan={9} style={styles.empty}>
+                <td colSpan={10} style={styles.empty}>
                   No results yet — tap "Run Scan".
                 </td>
               </tr>
@@ -111,6 +135,16 @@ export default function App() {
               <tr key={r.symbol} onClick={() => setSelected(r)} style={styles.row}>
                 <td style={styles.tdSymbol}>{r.symbol}</td>
                 <td style={{ ...styles.td, color: scoreColor(r.score), fontWeight: 700 }}>{r.score}</td>
+                <td style={styles.td}>
+                  {(() => {
+                    const level = r.breakdown?.early_pump_signal?.early_pump_probability || "low";
+                    return (
+                      <span style={{ ...pumpBadgeStyle(level), padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 700, textTransform: "uppercase" }}>
+                        {level}
+                      </span>
+                    );
+                  })()}
+                </td>
                 <td style={styles.td}>{r.monthly_rsi}</td>
                 <td style={styles.td}>{r.entry}</td>
                 <td style={styles.td}>{r.stop_loss}</td>
