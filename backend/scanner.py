@@ -119,7 +119,7 @@ def _build_trade_setup(df_1h, df_4h):
     }
 
 
-def  _early_pump_signal(dfs: dict) -> dict:
+def _early_pump_signal(dfs: dict) -> dict:
     """Heuristic, NOT a guarantee — combines a volatility squeeze (BB width
     near a 60-period low = coiled price) with OBV rising while price is
     roughly flat (quiet accumulation) on the 4h and 1d timeframes.
