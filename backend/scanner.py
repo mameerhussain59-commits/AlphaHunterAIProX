@@ -119,15 +119,18 @@ def _build_trade_setup(df_1h, df_4h):
     }
 
 
-def _early_pump_signal(dfs: dict) -> dict:
+def def _early_pump_signal(dfs: dict) -> dict:
     """Heuristic, NOT a guarantee — combines a volatility squeeze (BB width
     near a 60-period low = coiled price) with OBV rising while price is
     roughly flat (quiet accumulation) on the 4h and 1d timeframes.
+    4h is weighted higher than 1d since it's more actionable for near-term
+    moves — a strong 4h-only setup can still reach 'high'.
     Pumps can also be driven by news/listings/insider activity that no
     OHLCV-based signal can see coming — treat this as one extra data point,
     not a prediction."""
     signals = {}
-    score = 0
+    score = 0.0
+    tf_weight = {"4h": 1.5, "1d": 0.5}
     for tf in ("4h", "1d"):
         df = dfs[tf]
         closes = df["close"]
@@ -146,14 +149,16 @@ def _early_pump_signal(dfs: dict) -> dict:
             "price_change_pct_10candle": round(price_change_pct, 2),
             "quiet_accumulation": is_quiet_accumulation,
         }
+        w = tf_weight[tf]
         if is_squeeze:
-            score += 1
+            score += w
         if is_quiet_accumulation:
-            score += 1
+            score += w
 
-    if score >= 3:
+    # max possible = (1.5+1.5) + (0.5+0.5) = 4.0
+    if score >= 2.5:
         label = "high"
-    elif score >= 1:
+    elif score >= 1.0:
         label = "medium"
     else:
         label = "low"
