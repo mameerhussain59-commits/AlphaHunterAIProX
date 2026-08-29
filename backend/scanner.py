@@ -119,15 +119,16 @@ def _build_trade_setup(df_1h, df_4h):
     }
 
 
-def _early_pump_signal(dfs: dict) -> dict:
+def _early_pump_signal(dfs: dict, whale_notes: dict = None) -> dict:
     """Heuristic, NOT a guarantee — combines a volatility squeeze (BB width
-    near a 60-period low = coiled price) with OBV rising while price is
-    roughly flat (quiet accumulation) on the 4h and 1d timeframes.
+    near a 60-period low = coiled price), OBV rising while price is roughly
+    flat (quiet accumulation), volume acceleration (recent 5-candle volume
+    vs the prior 15), and whale buy-pressure (from the same-symbol whale
+    trade-flow check) into one score.
     4h is weighted higher than 1d since it's more actionable for near-term
-    moves — a strong 4h-only setup can still reach 'high'.
-    Pumps can also be driven by news/listings/insider activity that no
-    OHLCV-based signal can see coming — treat this as one extra data point,
-    not a prediction."""
+    moves. Pumps can also be driven by news/listings/insider activity that
+    no OHLCV-based signal can see coming — treat this as one extra data
+    point, not a prediction."""
     signals = {}
     score = 0.0
     tf_weight = {"4h": 1.5, "1d": 0.5}
@@ -139,8 +140,8 @@ def _early_pump_signal(dfs: dict) -> dict:
         obv_slope = float(o.tail(10).iloc[-1] - o.tail(10).iloc[0])
         price_change_pct = float((closes.iloc[-1] - closes.iloc[-10]) / closes.iloc[-10] * 100) if len(closes) >= 10 else 0.0
 
-        is_squeeze = squeeze_pctl < 0.15
-        is_quiet_accumulation = obv_slope > 0 and abs(price_change_pct) < 3.0
+        is_squeeze = squeeze_pctl < 0.25
+        is_quiet_accumulation = obv_slope > 0 and abs(price_change_pct) < 5.0
 
         signals[tf] = {
             "squeeze_percentile": round(squeeze_pctl, 3),
@@ -155,10 +156,30 @@ def _early_pump_signal(dfs: dict) -> dict:
         if is_quiet_accumulation:
             score += w
 
-    # max possible = (1.5+1.5) + (0.5+0.5) = 4.0
-    if score >= 2.5:
+    # Volume acceleration on 4h — recent 5 candles vs the prior 15
+    df_4h = dfs["4h"]
+    vol = df_4h["volume"]
+    if len(vol) >= 20:
+        recent5 = float(vol.tail(5).mean())
+        prior15 = float(vol.iloc[-20:-5].mean())
+        vol_accel_ratio = (recent5 / prior15) if prior15 else 1.0
+    else:
+        vol_accel_ratio = 1.0
+    volume_accelerating = vol_accel_ratio > 1.3
+    signals["volume_acceleration_ratio"] = round(vol_accel_ratio, 2)
+    if volume_accelerating:
+        score += 1.0
+
+    # Whale buy pressure (reuses the same whale trade-flow check already run for scoring)
+    whale_accumulating = bool(whale_notes and whale_notes.get("status") == "accumulation")
+    signals["whale_accumulating"] = whale_accumulating
+    if whale_accumulating:
+        score += 0.5
+
+    # max possible = (1.5+1.5) + (0.5+0.5) + 1.0 + 0.5 = 5.5
+    if score >= 3.0:
         label = "high"
-    elif score >= 1.0:
+    elif score >= 1.5:
         label = "medium"
     else:
         label = "low"
@@ -218,7 +239,7 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
     breakdown["whale"] = {"points": whale_pts, "max": sw.WHALE_WEIGHT, **whale_notes}
 
     # --- Early pump signal (informational only — never gates/rejects) ---
-    breakdown["early_pump_signal"] = _early_pump_signal(dfs)
+    breakdown["early_pump_signal"] = _early_pump_signal(dfs, whale_notes)
 
     setup = _build_trade_setup(dfs["1h"], dfs["4h"])
 
@@ -260,4 +281,4 @@ async def run_scan(min_volume_usdt: float = 500_000, max_symbols: int = 150):
         "gate_failed": gate_failed_count,
         "qualified": len(passed),
         "results": top20,
-  }
+    }
