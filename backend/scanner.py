@@ -165,6 +165,7 @@ def _early_pump_signal(dfs: dict) -> dict:
 
     return {"early_pump_probability": label, "note": "heuristic only, not a prediction", "details": signals}
 
+
 async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: float):
     """Run the full gate + scoring pipeline for one symbol. Returns None if the
     monthly RSI gate fails or data couldn't be fetched."""
@@ -259,4 +260,4 @@ async def run_scan(min_volume_usdt: float = 500_000, max_symbols: int = 150):
         "gate_failed": gate_failed_count,
         "qualified": len(passed),
         "results": top20,
-    }
+  }
