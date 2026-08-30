@@ -12,6 +12,7 @@ from sqlalchemy import select, delete
 
 from database import init_db, async_session, ScanResult
 from scanner import run_scan
+import market_regime
 
 app = FastAPI(title="Alpha Hunter Pro")
 
@@ -29,7 +30,9 @@ _scan_lock_running = False
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
-
+@app.get("/api/market-regime")
+async def get_market_regime_endpoint():
+    return await market_regime.get_market_regime()
 
 @app.post("/api/scan")
 async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 150):
