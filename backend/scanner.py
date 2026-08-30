@@ -177,9 +177,9 @@ def _early_pump_signal(dfs: dict, whale_notes: dict = None) -> dict:
         score += 0.5
 
     # max possible = (1.5+1.5) + (0.5+0.5) + 1.0 + 0.5 = 5.5
-    if score >= 3.0:
+    if score >= 2.5:
         label = "high"
-    elif score >= 1.5:
+    elif score >= 1.2:
         label = "medium"
     else:
         label = "low"
@@ -257,7 +257,7 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
 TOP_N_RESULTS = 20
 
 
-async def run_scan(min_volume_usdt: float = 500_000, max_symbols: int = 150):
+async def run_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300):
     """Scan USDT pairs on Binance, apply the monthly RSI gate, score survivors,
     return the top 20 sorted best-first. Uses only free public endpoints."""
     async with httpx.AsyncClient() as client:
