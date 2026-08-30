@@ -37,7 +37,16 @@ CHAIN_TO_GOPLUS = {
     "avalanche": "43114",
     "polygon": "137",
 }
-
+# our chain name -> DexScreener's URL chain slug (differs for bnb_chain)
+DEXSCREENER_CHAIN_SLUGS = {
+    "ethereum": "ethereum",
+    "bnb_chain": "bsc",
+    "base": "base",
+    "arbitrum": "arbitrum",
+    "avalanche": "avalanche",
+    "polygon": "polygon",
+    "solana": "solana",
+}
 
 async def _gather_candidates(max_per_chain: int = 10):
     result = await multichain.scan_multichain(max_per_chain=max_per_chain)
