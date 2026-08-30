@@ -13,6 +13,7 @@ from sqlalchemy import select, delete
 from database import init_db, async_session, ScanResult
 from scanner import run_scan
 import market_regime
+import multichain
 
 app = FastAPI(title="Alpha Hunter Pro")
 
@@ -33,7 +34,9 @@ async def health():
 @app.get("/api/market-regime")
 async def get_market_regime_endpoint():
     return await market_regime.get_market_regime()
-
+@app.get("/api/multichain/trending")
+async def get_multichain_trending_endpoint(max_per_chain: int = 10):
+    return await multichain.scan_multichain(max_per_chain=max_per_chain)
 @app.post("/api/scan")
 async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 150):
     global _scan_lock_running
