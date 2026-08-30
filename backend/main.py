@@ -14,6 +14,7 @@ from database import init_db, async_session, ScanResult
 from scanner import run_scan
 import market_regime
 import multichain
+import dex_scanner
 
 app = FastAPI(title="Alpha Hunter Pro")
 
@@ -26,30 +27,44 @@ app.add_middleware(
 
 _last_scan_meta = {"scan_id": None, "scanned": 0, "gate_failed": 0, "qualified": 0, "finished_at": None}
 _scan_lock_running = False
+_previously_alerted_high_symbols = set()
 
 
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+
 @app.get("/api/market-regime")
 async def get_market_regime_endpoint():
     return await market_regime.get_market_regime()
+
+
 @app.get("/api/multichain/trending")
 async def get_multichain_trending_endpoint(max_per_chain: int = 10):
     return await multichain.scan_multichain(max_per_chain=max_per_chain)
+
+
 @app.post("/api/scan")
-async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 150):
+async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300, max_per_chain: int = 10):
     global _scan_lock_running
     if _scan_lock_running:
         raise HTTPException(status_code=409, detail="A scan is already running — try again shortly.")
     _scan_lock_running = True
     try:
-        result = await run_scan(min_volume_usdt=min_volume_usdt, max_symbols=max_symbols)
+        binance_result = await run_scan(min_volume_usdt=min_volume_usdt, max_symbols=max_symbols)
+        dex_results = await dex_scanner.scan_dex(max_per_chain=max_per_chain)
+
+        merged = binance_result["results"] + dex_results
+        merged.sort(key=lambda r: r["score"], reverse=True)
+        merged = merged[:20]
+
         scan_id = str(uuid.uuid4())
 
         async with async_session() as session:
+            # keep only the latest scan's rows to stay light on free-tier disk
             await session.execute(delete(ScanResult))
-            for r in result["results"]:
+            for r in merged:
                 session.add(ScanResult(
                     scan_id=scan_id,
                     symbol=r["symbol"],
@@ -68,12 +83,15 @@ async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 150)
 
         _last_scan_meta.update({
             "scan_id": scan_id,
-            "scanned": result["scanned"],
-            "gate_failed": result["gate_failed"],
-            "qualified": result["qualified"],
+            "scanned": binance_result["scanned"],
+            "gate_failed": binance_result["gate_failed"],
+            "qualified": len(merged),
+            "binance_qualified": binance_result["qualified"],
+            "dex_qualified": len(dex_results),
             "finished_at": datetime.now(timezone.utc).isoformat(),
         })
-        return {"scan_id": scan_id, **_last_scan_meta, "results": result["results"]}
+
+        return {"scan_id": scan_id, **_last_scan_meta, "results": merged}
     finally:
         _scan_lock_running = False
 
@@ -152,6 +170,8 @@ async def on_startup():
     await init_db()
 
 
+# Serve the built React frontend (populated at backend/static/ by the Docker build).
+# Guarded so local `uvicorn main:app --reload` still works before you've run a frontend build.
 import os
 if os.path.isdir("static"):
     app.mount("/", StaticFiles(directory="static", html=True), name="static")
