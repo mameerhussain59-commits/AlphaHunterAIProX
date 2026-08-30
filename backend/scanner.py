@@ -240,6 +240,8 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
 
     # --- Early pump signal (informational only — never gates/rejects) ---
     breakdown["early_pump_signal"] = _early_pump_signal(dfs, whale_notes)
+    breakdown["source"] = "binance"
+    breakdown["binance_url"] = f"https://www.binance.com/en/trade/{symbol}"
 
     setup = _build_trade_setup(dfs["1h"], dfs["4h"])
 
