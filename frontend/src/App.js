@@ -163,7 +163,24 @@ export default function App() {
           <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <h2>{selected.symbol}</h2>
             <p>Score: {selected.score} / 100</p>
-            <p>Monthly RSI: {selected.monthly_rsi}</p>
+            {selected.monthly_rsi != null && <p>Monthly RSI: {selected.monthly_rsi}</p>}
+            {selected.breakdown?.contract_address && (
+              <p style={{ wordBreak: "break-all", fontSize: 12, color: "#8b949e" }}>
+                Contract: <span style={{ fontFamily: "monospace" }}>{selected.breakdown.contract_address}</span>
+              </p>
+            )}
+            <div style={{ display: "flex", gap: 8, margin: "10px 0" }}>
+              {selected.breakdown?.dexscreener_url && (
+                <a href={selected.breakdown.dexscreener_url} target="_blank" rel="noopener noreferrer" style={styles.linkButton}>
+                  View on DexScreener
+                </a>
+              )}
+              {selected.breakdown?.binance_url && (
+                <a href={selected.breakdown.binance_url} target="_blank" rel="noopener noreferrer" style={styles.linkButton}>
+                  View on Binance
+                </a>
+              )}
+            </div>
             <h3>Timeframe breakdown</h3>
             <pre style={styles.pre}>{JSON.stringify(selected.breakdown, null, 2)}</pre>
             <button onClick={() => setSelected(null)} style={styles.button}>
