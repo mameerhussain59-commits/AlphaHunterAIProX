@@ -34,14 +34,25 @@ def _to_float(v):
         return None
 
 
-def _parse_pool(p, chain_name):
+def _parse_pool(p, chain_name, gt_network_id):
     attr = p.get("attributes", {}) or {}
     price_change = attr.get("price_change_percentage") or {}
     volume = attr.get("volume_usd") or {}
+
+    base_token_address = None
+    try:
+        base_id = (p.get("relationships", {}).get("base_token", {}).get("data", {}) or {}).get("id")
+        prefix = f"{gt_network_id}_"
+        if base_id and base_id.startswith(prefix):
+            base_token_address = base_id[len(prefix):]
+    except Exception:
+        pass
+
     return {
         "chain": chain_name,
         "pair": attr.get("name"),
         "pool_address": attr.get("address"),
+        "base_token_address": base_token_address,
         "price_usd": _to_float(attr.get("base_token_price_usd")),
         "price_change_1h_pct": _to_float(price_change.get("h1")),
         "price_change_24h_pct": _to_float(price_change.get("h24")),
@@ -61,7 +72,7 @@ async def _get_pools(client: httpx.AsyncClient, endpoint: str, gt_network_id: st
         )
         resp.raise_for_status()
         data = resp.json().get("data", [])
-        return [_parse_pool(p, chain_name) for p in data[:limit]]
+        return [_parse_pool(p, chain_name, gt_network_id) for p in data[:limit]]
     except Exception:
         return []
 
