@@ -165,6 +165,8 @@ async def _score_candidate(client: httpx.AsyncClient, pool: dict):
 
     setup = _approx_trade_setup(pool)
     pump_signal = _dex_pump_signal(pool)
+    dex_slug = DEXSCREENER_CHAIN_SLUGS.get(pool["chain"], pool["chain"])
+    dexscreener_url = f"https://dexscreener.com/{dex_slug}/{pool['pool_address']}"
 
     return {
         "symbol": f"{pool['pair']} [{pool['chain']}]",
@@ -176,7 +178,8 @@ async def _score_candidate(client: httpx.AsyncClient, pool: dict):
             "source": "dex",
             "chain": pool["chain"],
             "pool_address": pool["pool_address"],
-            "base_token_address": pool["base_token_address"],
+            "contract_address": pool["base_token_address"],
+            "dexscreener_url": dexscreener_url,
             "momentum": {"points": momentum, "max": 40, "price_change_1h_pct": pool.get("price_change_1h_pct"), "price_change_24h_pct": pool.get("price_change_24h_pct")},
             "volume_health": {"points": vol_health, "max": 30},
             "security": {"points": round(security_pts, 2), "max": 20, **sec_notes},
