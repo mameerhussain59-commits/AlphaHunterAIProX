@@ -1,6 +1,7 @@
 import csv
 import io
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -15,6 +16,7 @@ from scanner import run_scan
 import market_regime
 import multichain
 import dex_scanner
+import telegram_alerts
 
 app = FastAPI(title="Alpha Hunter Pro")
 
@@ -28,6 +30,17 @@ app.add_middleware(
 _last_scan_meta = {"scan_id": None, "scanned": 0, "gate_failed": 0, "qualified": 0, "finished_at": None}
 _scan_lock_running = False
 _previously_alerted_high_symbols = set()
+
+HIGH_SCORE_THRESHOLD = float(os.getenv("HIGH_SCORE_THRESHOLD", "80"))
+MEDIUM_SCORE_THRESHOLD = float(os.getenv("MEDIUM_SCORE_THRESHOLD", "50"))
+
+
+def get_tier(score: float) -> str:
+    if score >= HIGH_SCORE_THRESHOLD:
+        return "high"
+    elif score >= MEDIUM_SCORE_THRESHOLD:
+        return "medium"
+    return "low"
 
 
 @app.get("/api/health")
@@ -59,10 +72,12 @@ async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
         merged.sort(key=lambda r: r["score"], reverse=True)
         merged = merged[:20]
 
+        for r in merged:
+            r["tier"] = get_tier(r["score"])
+
         scan_id = str(uuid.uuid4())
 
         async with async_session() as session:
-            # keep only the latest scan's rows to stay light on free-tier disk
             await session.execute(delete(ScanResult))
             for r in merged:
                 session.add(ScanResult(
@@ -81,6 +96,16 @@ async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
                 ))
             await session.commit()
 
+        current_high_symbols = set()
+        for r in merged:
+            if r["tier"] == "high":
+                current_high_symbols.add(r["symbol"])
+                if r["symbol"] not in _previously_alerted_high_symbols:
+                    message = telegram_alerts.format_high_score_alert(r)
+                    await telegram_alerts.send_telegram_message(message)
+        _previously_alerted_high_symbols.clear()
+        _previously_alerted_high_symbols.update(current_high_symbols)
+
         _last_scan_meta.update({
             "scan_id": scan_id,
             "scanned": binance_result["scanned"],
@@ -88,6 +113,7 @@ async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
             "qualified": len(merged),
             "binance_qualified": binance_result["qualified"],
             "dex_qualified": len(dex_results),
+            "high_score_count": len(current_high_symbols),
             "finished_at": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -97,12 +123,18 @@ async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
 
 
 @app.get("/api/scan/latest")
-async def latest_scan():
+async def latest_scan(min_score: float = 0, tier: str | None = None):
     async with async_session() as session:
-        res = await session.execute(select(ScanResult).order_by(ScanResult.score.desc()))
+        query = select(ScanResult).where(ScanResult.score >= min_score).order_by(ScanResult.score.desc())
+        res = await session.execute(query)
         rows = res.scalars().all()
+
+    if tier:
+        rows = [r for r in rows if get_tier(r.score) == tier]
+
     if not rows:
         return {"scan_id": None, "results": [], "message": "No scan yet — POST /api/scan to run one."}
+
     return {
         "scan_id": rows[0].scan_id,
         "meta": _last_scan_meta,
@@ -110,6 +142,7 @@ async def latest_scan():
             {
                 "symbol": r.symbol,
                 "score": r.score,
+                "tier": get_tier(r.score),
                 "monthly_rsi": r.monthly_rsi,
                 "entry": r.entry,
                 "stop_loss": r.stop_loss,
@@ -118,6 +151,33 @@ async def latest_scan():
                 "tp3": r.tp3,
                 "volume_24h": r.volume_24h,
                 "breakdown": json.loads(r.breakdown) if r.breakdown else {},
+            }
+            for r in rows
+        ],
+    }
+
+
+@app.get("/api/scan/high-score")
+async def high_score_tokens():
+    async with async_session() as session:
+        query = select(ScanResult).where(ScanResult.score >= HIGH_SCORE_THRESHOLD).order_by(ScanResult.score.desc())
+        res = await session.execute(query)
+        rows = res.scalars().all()
+    return {
+        "threshold": HIGH_SCORE_THRESHOLD,
+        "count": len(rows),
+        "results": [
+            {
+                "symbol": r.symbol,
+                "score": r.score,
+                "tier": "high",
+                "monthly_rsi": r.monthly_rsi,
+                "entry": r.entry,
+                "stop_loss": r.stop_loss,
+                "tp1": r.tp1,
+                "tp2": r.tp2,
+                "tp3": r.tp3,
+                "volume_24h": r.volume_24h,
             }
             for r in rows
         ],
@@ -134,6 +194,7 @@ async def token_detail(symbol: str):
     return {
         "symbol": row.symbol,
         "score": row.score,
+        "tier": get_tier(row.score),
         "monthly_rsi": row.monthly_rsi,
         "entry": row.entry,
         "stop_loss": row.stop_loss,
@@ -154,9 +215,9 @@ async def export_csv():
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["symbol", "score", "monthly_rsi", "entry", "stop_loss", "tp1", "tp2", "tp3", "volume_24h"])
+    writer.writerow(["symbol", "score", "tier", "monthly_rsi", "entry", "stop_loss", "tp1", "tp2", "tp3", "volume_24h"])
     for r in rows:
-        writer.writerow([r.symbol, r.score, r.monthly_rsi, r.entry, r.stop_loss, r.tp1, r.tp2, r.tp3, r.volume_24h])
+        writer.writerow([r.symbol, r.score, get_tier(r.score), r.monthly_rsi, r.entry, r.stop_loss, r.tp1, r.tp2, r.tp3, r.volume_24h])
     buf.seek(0)
     return StreamingResponse(
         iter([buf.getvalue()]),
@@ -170,8 +231,5 @@ async def on_startup():
     await init_db()
 
 
-# Serve the built React frontend (populated at backend/static/ by the Docker build).
-# Guarded so local `uvicorn main:app --reload` still works before you've run a frontend build.
-import os
 if os.path.isdir("static"):
     app.mount("/", StaticFiles(directory="static", html=True), name="static")
