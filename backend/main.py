@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import json
@@ -34,6 +35,10 @@ _previously_alerted_high_symbols = set()
 HIGH_SCORE_THRESHOLD = float(os.getenv("HIGH_SCORE_THRESHOLD", "80"))
 MEDIUM_SCORE_THRESHOLD = float(os.getenv("MEDIUM_SCORE_THRESHOLD", "50"))
 
+# How often the background scanner runs automatically, in minutes.
+# Set SCAN_INTERVAL_MINUTES=0 in .env to disable auto-scanning entirely.
+SCAN_INTERVAL_MINUTES = float(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
+
 
 def get_tier(score: float) -> str:
     if score >= HIGH_SCORE_THRESHOLD:
@@ -43,26 +48,11 @@ def get_tier(score: float) -> str:
     return "low"
 
 
-@app.get("/api/health")
-async def health():
-    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
-
-
-@app.get("/api/market-regime")
-async def get_market_regime_endpoint():
-    return await market_regime.get_market_regime()
-
-
-@app.get("/api/multichain/trending")
-async def get_multichain_trending_endpoint(max_per_chain: int = 10):
-    return await multichain.scan_multichain(max_per_chain=max_per_chain)
-
-
-@app.post("/api/scan")
-async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300, max_per_chain: int = 10):
+async def perform_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300, max_per_chain: int = 10):
+    """Core scan logic — shared by the manual /api/scan endpoint and the background loop."""
     global _scan_lock_running
     if _scan_lock_running:
-        raise HTTPException(status_code=409, detail="A scan is already running — try again shortly.")
+        return {"skipped": True, "reason": "A scan is already running"}
     _scan_lock_running = True
     try:
         binance_result = await run_scan(min_volume_usdt=min_volume_usdt, max_symbols=max_symbols)
@@ -120,6 +110,43 @@ async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
         return {"scan_id": scan_id, **_last_scan_meta, "results": merged}
     finally:
         _scan_lock_running = False
+
+
+async def background_scan_loop():
+    """Runs perform_scan() forever, sleeping SCAN_INTERVAL_MINUTES between runs."""
+    if SCAN_INTERVAL_MINUTES <= 0:
+        return
+    # Small initial delay so the app finishes starting up first.
+    await asyncio.sleep(10)
+    while True:
+        try:
+            await perform_scan()
+        except Exception as e:
+            print(f"[background_scan_loop] scan failed: {e}")
+        await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
+
+
+@app.get("/api/market-regime")
+async def get_market_regime_endpoint():
+    return await market_regime.get_market_regime()
+
+
+@app.get("/api/multichain/trending")
+async def get_multichain_trending_endpoint(max_per_chain: int = 10):
+    return await multichain.scan_multichain(max_per_chain=max_per_chain)
+
+
+@app.post("/api/scan")
+async def trigger_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300, max_per_chain: int = 10):
+    if _scan_lock_running:
+        raise HTTPException(status_code=409, detail="A scan is already running — try again shortly.")
+    result = await perform_scan(min_volume_usdt=min_volume_usdt, max_symbols=max_symbols, max_per_chain=max_per_chain)
+    return result
 
 
 @app.get("/api/scan/latest")
@@ -229,6 +256,7 @@ async def export_csv():
 @app.on_event("startup")
 async def on_startup():
     await init_db()
+    asyncio.create_task(background_scan_loop())
 
 
 if os.path.isdir("static"):
