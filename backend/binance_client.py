@@ -3,9 +3,7 @@ Binance PUBLIC market-data endpoints only — no API key/secret needed.
 """
 import asyncio
 import httpx
-
-BASE_URL = "https://api.binance.com"
-
+BASE_URL = "https://data-api.binance.vision"
 INTERVAL_MAP = {
     "1M": "1M",
     "1w": "1w",
