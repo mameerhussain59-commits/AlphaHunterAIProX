@@ -96,9 +96,45 @@ def _score_timeframe(df, tf: str) -> tuple[float, dict]:
     return round(pts, 2), detail
 
 
+def _human_duration(hours: float) -> str:
+    if hours < 1:
+        return f"~{max(round(hours * 60), 5)}m"
+    if hours < 24:
+        return f"~{round(hours, 1)}h"
+    return f"~{round(hours / 24, 1)}d"
+
+
+def _estimate_time_to_targets(atr_1h: float, entry: float, tp1: float, tp2: float, tp3: float) -> dict:
+    """Rough heuristic ONLY — not a prediction or a guarantee. Uses the recent
+    1H ATR (average hourly price range) as a proxy for how fast this token
+    typically moves, then estimates how many hours of that typical movement
+    it would take to cover the distance from entry to each target. Real
+    price action rarely moves in a straight line — treat this as a ballpark
+    for planning, not a countdown timer."""
+    if atr_1h <= 0:
+        return {"note": "insufficient volatility data for a time estimate"}
+
+    def hours_for(target):
+        distance = abs(target - entry)
+        hours = distance / atr_1h
+        return round(max(hours, 0.1), 1)
+
+    h1, h2, h3 = hours_for(tp1), hours_for(tp2), hours_for(tp3)
+    return {
+        "tp1_hours": h1,
+        "tp1_human": _human_duration(h1),
+        "tp2_hours": h2,
+        "tp2_human": _human_duration(h2),
+        "tp3_hours": h3,
+        "tp3_human": _human_duration(h3),
+        "note": "heuristic based on recent 1H volatility (ATR) — not a prediction or guarantee of timing",
+    }
+
+
 def _build_trade_setup(df_1h, df_4h):
     """Entry at current price; SL below recent swing low (with ATR buffer);
-    TPs at 1.5R / 3R / 5R."""
+    TPs at 1.5R / 3R / 5R. Also returns a rough ATR-based time-to-target
+    estimate for each TP (see _estimate_time_to_targets)."""
     entry = float(df_1h["close"].iloc[-1])
     atr_1h = float(ind.atr(df_1h).iloc[-1])
     low = ind.swing_low(df_4h, lookback=20)
@@ -110,13 +146,16 @@ def _build_trade_setup(df_1h, df_4h):
     tp1 = entry + risk * 1.5
     tp2 = entry + risk * 3
     tp3 = entry + risk * 5
+
+    time_estimate = _estimate_time_to_targets(atr_1h, entry, tp1, tp2, tp3)
+
     return {
         "entry": round(entry, 8),
         "stop_loss": round(stop_loss, 8),
         "tp1": round(tp1, 8),
         "tp2": round(tp2, 8),
         "tp3": round(tp3, 8),
-    }
+    }, time_estimate
 
 
 def _early_pump_signal(dfs: dict, whale_notes: dict = None) -> dict:
@@ -243,7 +282,8 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
     breakdown["source"] = "binance"
     breakdown["binance_url"] = f"https://www.binance.com/en/trade/{symbol}"
 
-    setup = _build_trade_setup(dfs["1h"], dfs["4h"])
+    setup, time_estimate = _build_trade_setup(dfs["1h"], dfs["4h"])
+    breakdown["time_estimate"] = time_estimate
 
     return {
         "symbol": symbol,
@@ -283,4 +323,4 @@ async def run_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300):
         "gate_failed": gate_failed_count,
         "qualified": len(passed),
         "results": top20,
-    }
+}
