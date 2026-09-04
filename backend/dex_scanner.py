@@ -11,7 +11,8 @@ Pipeline per candidate:
   4. Approximate trade setup (entry/SL/TP) — NOTE: unlike the Binance side,
      we don't pull OHLCV candles here (keeps API calls low across 7 chains),
      so the stop distance is sized off the 24h price-change magnitude rather
-     than true ATR. Labeled clearly as an approximation.
+     than true ATR. Labeled clearly as an approximation. Same applies to the
+     time-to-target estimate below.
 
 No paid API used — GeckoTerminal (trending/new pools) + GoPlus (security),
 both free and keyless.
@@ -24,11 +25,9 @@ import security_whale as sw
 
 MIN_LIQUIDITY_USD = 10_000
 MIN_VOLUME_24H_USD = 5_000
-MAX_DEX_CANDIDATES = 20  # capped to keep GoPlus/API call volume reasonable
+MAX_DEX_CANDIDATES = 20
 CONCURRENCY = 4
 
-# GeckoTerminal chain name -> GoPlus numeric chain id (EVM chains only;
-# Solana uses a different GoPlus endpoint shape and isn't covered here yet)
 CHAIN_TO_GOPLUS = {
     "ethereum": "1",
     "bnb_chain": "56",
@@ -37,7 +36,6 @@ CHAIN_TO_GOPLUS = {
     "avalanche": "43114",
     "polygon": "137",
 }
-# our chain name -> DexScreener's URL chain slug (differs for bnb_chain)
 DEXSCREENER_CHAIN_SLUGS = {
     "ethereum": "ethereum",
     "bnb_chain": "bsc",
@@ -47,6 +45,7 @@ DEXSCREENER_CHAIN_SLUGS = {
     "polygon": "polygon",
     "solana": "solana",
 }
+
 
 async def _gather_candidates(max_per_chain: int = 10):
     result = await multichain.scan_multichain(max_per_chain=max_per_chain)
@@ -71,24 +70,21 @@ async def _gather_candidates(max_per_chain: int = 10):
 
 
 def _score_momentum(pool) -> float:
-    """0..40 — reward continuing upward momentum, penalize clear dumps."""
     h1 = pool.get("price_change_1h_pct") or 0
     h24 = pool.get("price_change_24h_pct") or 0
-    score = 20.0  # neutral baseline
+    score = 20.0
     if h24 > 0 and h1 > 0:
-        score = 32.0 if h1 >= h24 / 24 * 3 else 26.0  # 1h pace outrunning the 24h average = accelerating
+        score = 32.0 if h1 >= h24 / 24 * 3 else 26.0
     elif h24 > 0 >= h1:
-        score = 18.0  # up on the day but cooling right now
+        score = 18.0
     elif h24 <= 0 < h1:
-        score = 24.0  # early bounce off a down day
+        score = 24.0
     else:
-        score = 8.0  # down on both — avoid chasing a dump
+        score = 8.0
     return min(score, 40.0)
 
 
 def _score_volume_health(pool) -> float:
-    """0..30 — reward a healthy volume/liquidity ratio; too low = dead,
-    extremely high = often wash-trade/manipulation-prone."""
     vol = pool.get("volume_24h_usd") or 0
     liq = pool.get("liquidity_usd") or 1
     ratio = vol / liq
@@ -97,8 +93,8 @@ def _score_volume_health(pool) -> float:
     if 0.1 <= ratio < 0.3 or 5 < ratio <= 15:
         return 18.0
     if ratio > 15:
-        return 6.0  # suspiciously high turnover vs liquidity
-    return 8.0  # too quiet
+        return 6.0
+    return 8.0
 
 
 def _score_newness(pool) -> float:
@@ -106,8 +102,6 @@ def _score_newness(pool) -> float:
 
 
 def _dex_pump_signal(pool) -> dict:
-    """Lightweight heuristic reusing already-fetched fields (no extra API
-    calls) — NOT a guarantee, same caveat as the Binance-side signal."""
     h1 = pool.get("price_change_1h_pct") or 0
     h24 = pool.get("price_change_24h_pct") or 0
     vol = pool.get("volume_24h_usd") or 0
@@ -127,14 +121,42 @@ def _dex_pump_signal(pool) -> dict:
     }
 
 
+def _human_duration(hours: float) -> str:
+    if hours < 1:
+        return f"~{max(round(hours * 60), 5)}m"
+    if hours < 24:
+        return f"~{round(hours, 1)}h"
+    return f"~{round(hours / 24, 1)}d"
+
+
+def _approx_time_to_targets(pool, stop_pct: float) -> dict:
+    h24 = abs(pool.get("price_change_24h_pct") or 0)
+    daily_move_pct = max(h24, 1.0)
+
+    def days_for(multiple):
+        target_pct_distance = stop_pct * 100 * multiple
+        days = target_pct_distance / daily_move_pct
+        return round(max(days, 0.05), 2)
+
+    d1, d2, d3 = days_for(1.5), days_for(3), days_for(5)
+    return {
+        "tp1_hours": round(d1 * 24, 1),
+        "tp1_human": _human_duration(d1 * 24),
+        "tp2_hours": round(d2 * 24, 1),
+        "tp2_human": _human_duration(d2 * 24),
+        "tp3_hours": round(d3 * 24, 1),
+        "tp3_human": _human_duration(d3 * 24),
+        "note": "rough approximation from 24h volatility (no OHLCV history for DEX candidates) — not a prediction or guarantee of timing",
+    }
+
+
 def _approx_trade_setup(pool):
-    """No OHLCV pulled here, so stop distance is sized off 24h volatility
-    magnitude rather than true ATR — approximation, clearly labeled."""
     entry = pool.get("price_usd") or 0
     h24 = abs(pool.get("price_change_24h_pct") or 10)
-    stop_pct = min(max(h24 / 100, 0.08), 0.25)  # between 8% and 25%
+    stop_pct = min(max(h24 / 100, 0.08), 0.25)
     stop_loss = entry * (1 - stop_pct)
     risk = entry - stop_loss
+    time_estimate = _approx_time_to_targets(pool, stop_pct)
     return {
         "entry": entry,
         "stop_loss": round(stop_loss, 10),
@@ -142,7 +164,7 @@ def _approx_trade_setup(pool):
         "tp2": round(entry + risk * 3, 10),
         "tp3": round(entry + risk * 5, 10),
         "trade_setup_note": "approximated from 24h volatility, not true ATR (no OHLCV pulled for DEX candidates)",
-    }
+    }, time_estimate
 
 
 async def _score_candidate(client: httpx.AsyncClient, pool: dict):
@@ -155,15 +177,15 @@ async def _score_candidate(client: httpx.AsyncClient, pool: dict):
             sec_data = None
     sec_pts, sec_reject, sec_notes = sw.score_security(sec_data)
     if sec_reject:
-        return None  # honeypot/extreme tax — hard reject, matches Binance-side rule
+        return None
 
     momentum = _score_momentum(pool)
     vol_health = _score_volume_health(pool)
     newness = _score_newness(pool)
-    security_pts = (sec_pts / sw.SECURITY_WEIGHT) * 20  # rescale security's 0..10 to 0..20 for DEX weighting
+    security_pts = (sec_pts / sw.SECURITY_WEIGHT) * 20
     total_score = round(momentum + vol_health + security_pts + newness, 2)
 
-    setup = _approx_trade_setup(pool)
+    setup, time_estimate = _approx_trade_setup(pool)
     pump_signal = _dex_pump_signal(pool)
     dex_slug = DEXSCREENER_CHAIN_SLUGS.get(pool["chain"], pool["chain"])
     dexscreener_url = f"https://dexscreener.com/{dex_slug}/{pool['pool_address']}"
@@ -185,6 +207,7 @@ async def _score_candidate(client: httpx.AsyncClient, pool: dict):
             "security": {"points": round(security_pts, 2), "max": 20, **sec_notes},
             "newness": {"points": newness, "max": 10, "is_new_pool": pool.get("is_new", False)},
             "early_pump_signal": pump_signal,
+            "time_estimate": time_estimate,
         },
         **setup,
     }
