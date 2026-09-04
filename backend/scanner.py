@@ -20,21 +20,25 @@ import security_whale as sw
 
 TIMEFRAMES = ["1w", "1d", "4h", "1h", "15m"]
 
-# Technical points per timeframe (sums to 75). Remaining 25 = whale (15) + security (10).
 WEIGHTS = {"1w": 15, "1d": 20, "4h": 15, "1h": 15, "15m": 10}
 
 MONTHLY_RSI_GATE = 30
-CONCURRENCY = 8  # simultaneous symbols being analyzed, keeps us well under Binance rate limits
+CONCURRENCY = 8
 
+ENTRY_TIMING_TFS = {"1h", "15m"}
 
-ENTRY_TIMING_TFS = {"1h", "15m"}  # fast timeframes get StochRSI + Bollinger blended in
+CHAIN_ID_TO_DEXSCREENER = {
+    "1": "ethereum",
+    "56": "bsc",
+    "137": "polygon",
+    "42161": "arbitrum",
+    "10": "optimism",
+    "43114": "avalanche",
+    "8453": "base",
+}
 
 
 def _score_timeframe(df, tf: str) -> tuple[float, dict]:
-    """Score one timeframe 0..WEIGHTS[tf] based on RSI position, MACD momentum,
-    and volume confirmation on the most recent closed candle. On the fast
-    entry-timing timeframes (1h/15m), the RSI component is blended with
-    StochRSI and Bollinger %B for a sharper reversal signal."""
     max_pts = WEIGHTS[tf]
     closes = df["close"]
     r = ind.rsi(closes).iloc[-1]
@@ -47,7 +51,6 @@ def _score_timeframe(df, tf: str) -> tuple[float, dict]:
     pts = 0.0
     detail = {}
 
-    # RSI component (50% of this timeframe's points) — reward oversold-recovering zone
     rsi_pts = max_pts * 0.5
 
     def _rsi_band_score(val):
@@ -67,7 +70,6 @@ def _score_timeframe(df, tf: str) -> tuple[float, dict]:
         stoch_k = float(k.iloc[-1])
         _, _, _, percent_b = ind.bollinger_bands(closes)
         pb = float(percent_b.iloc[-1])
-        # StochRSI < 20 = oversold; percent_b near/under 0 = price at or below lower band
         stoch_score = 1.0 if stoch_k < 20 else (0.7 if stoch_k < 40 else 0.2)
         bb_score = 1.0 if pb < 0.1 else (0.7 if pb < 0.3 else (0.3 if pb < 0.6 else 0.1))
         rsi_score = (rsi_score + stoch_score + bb_score) / 3
@@ -76,17 +78,15 @@ def _score_timeframe(df, tf: str) -> tuple[float, dict]:
 
     pts += rsi_pts * rsi_score
 
-    # MACD momentum component (30%) — reward bullish histogram cross / rising momentum
     macd_pts = max_pts * 0.3
     if hist_last > 0 and hist_prev <= 0:
-        macd_score = 1.0  # fresh bullish cross
+        macd_score = 1.0
     elif hist_last > hist_prev:
-        macd_score = 0.6  # momentum improving
+        macd_score = 0.6
     else:
         macd_score = 0.2
     pts += macd_pts * macd_score
 
-    # Volume confirmation component (20%) — reward above-average volume on the latest candle
     vol_pts = max_pts * 0.2
     vol_ratio = (vol_last / vol_avg) if vol_avg else 1.0
     vol_score = min(vol_ratio / 1.5, 1.0)
@@ -105,12 +105,6 @@ def _human_duration(hours: float) -> str:
 
 
 def _estimate_time_to_targets(atr_1h: float, entry: float, tp1: float, tp2: float, tp3: float) -> dict:
-    """Rough heuristic ONLY — not a prediction or a guarantee. Uses the recent
-    1H ATR (average hourly price range) as a proxy for how fast this token
-    typically moves, then estimates how many hours of that typical movement
-    it would take to cover the distance from entry to each target. Real
-    price action rarely moves in a straight line — treat this as a ballpark
-    for planning, not a countdown timer."""
     if atr_1h <= 0:
         return {"note": "insufficient volatility data for a time estimate"}
 
@@ -132,9 +126,6 @@ def _estimate_time_to_targets(atr_1h: float, entry: float, tp1: float, tp2: floa
 
 
 def _build_trade_setup(df_1h, df_4h):
-    """Entry at current price; SL below recent swing low (with ATR buffer);
-    TPs at 1.5R / 3R / 5R. Also returns a rough ATR-based time-to-target
-    estimate for each TP (see _estimate_time_to_targets)."""
     entry = float(df_1h["close"].iloc[-1])
     atr_1h = float(ind.atr(df_1h).iloc[-1])
     low = ind.swing_low(df_4h, lookback=20)
@@ -159,15 +150,6 @@ def _build_trade_setup(df_1h, df_4h):
 
 
 def _early_pump_signal(dfs: dict, whale_notes: dict = None) -> dict:
-    """Heuristic, NOT a guarantee — combines a volatility squeeze (BB width
-    near a 60-period low = coiled price), OBV rising while price is roughly
-    flat (quiet accumulation), volume acceleration (recent 5-candle volume
-    vs the prior 15), and whale buy-pressure (from the same-symbol whale
-    trade-flow check) into one score.
-    4h is weighted higher than 1d since it's more actionable for near-term
-    moves. Pumps can also be driven by news/listings/insider activity that
-    no OHLCV-based signal can see coming — treat this as one extra data
-    point, not a prediction."""
     signals = {}
     score = 0.0
     tf_weight = {"4h": 1.5, "1d": 0.5}
@@ -195,7 +177,6 @@ def _early_pump_signal(dfs: dict, whale_notes: dict = None) -> dict:
         if is_quiet_accumulation:
             score += w
 
-    # Volume acceleration on 4h — recent 5 candles vs the prior 15
     df_4h = dfs["4h"]
     vol = df_4h["volume"]
     if len(vol) >= 20:
@@ -209,13 +190,11 @@ def _early_pump_signal(dfs: dict, whale_notes: dict = None) -> dict:
     if volume_accelerating:
         score += 1.0
 
-    # Whale buy pressure (reuses the same whale trade-flow check already run for scoring)
     whale_accumulating = bool(whale_notes and whale_notes.get("status") == "accumulation")
     signals["whale_accumulating"] = whale_accumulating
     if whale_accumulating:
         score += 0.5
 
-    # max possible = (1.5+1.5) + (0.5+0.5) + 1.0 + 0.5 = 5.5
     if score >= 2.5:
         label = "high"
     elif score >= 1.2:
@@ -227,8 +206,6 @@ def _early_pump_signal(dfs: dict, whale_notes: dict = None) -> dict:
 
 
 async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: float):
-    """Run the full gate + scoring pipeline for one symbol. Returns None if the
-    monthly RSI gate fails or data couldn't be fetched."""
     try:
         monthly = await bc.get_klines(client, symbol, "1M", limit=60)
     except Exception:
@@ -254,21 +231,28 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
         total_score += pts
         breakdown[tf] = {"points": pts, "max": WEIGHTS[tf], **detail}
 
-    # --- Security check (rugpull/honeypot/liquidity-lock) — best effort, free ---
     base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol
     try:
         chain_id, contract = await sw.find_contract(client, base_asset)
         sec_data = await sw.check_token_security(client, chain_id, contract) if contract else None
     except Exception:
+        chain_id, contract = None, None
         sec_data = None
     sec_pts, sec_reject, sec_notes = sw.score_security(sec_data)
     if sec_reject:
-        # hard reject — honeypot or extreme tax, matches "no rugpull/no honeypot" rule
         return None
     total_score += sec_pts
     breakdown["security"] = {"points": round(sec_pts, 2), "max": sw.SECURITY_WEIGHT, **sec_notes}
 
-    # --- Whale trade flow (Binance large-order buy/sell pressure) — free, no key ---
+    dexscreener_url = None
+    if contract and chain_id:
+        slug = CHAIN_ID_TO_DEXSCREENER.get(chain_id)
+        if slug:
+            dexscreener_url = f"https://dexscreener.com/{slug}/{contract}"
+    breakdown["contract_address"] = contract
+    breakdown["chain_id"] = chain_id
+    breakdown["dexscreener_url"] = dexscreener_url
+
     try:
         whale_data = await sw.get_whale_flow(client, symbol)
     except Exception:
@@ -277,7 +261,6 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
     total_score += whale_pts
     breakdown["whale"] = {"points": whale_pts, "max": sw.WHALE_WEIGHT, **whale_notes}
 
-    # --- Early pump signal (informational only — never gates/rejects) ---
     breakdown["early_pump_signal"] = _early_pump_signal(dfs, whale_notes)
     breakdown["source"] = "binance"
     breakdown["binance_url"] = f"https://www.binance.com/en/trade/{symbol}"
@@ -300,8 +283,6 @@ TOP_N_RESULTS = 20
 
 
 async def run_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300):
-    """Scan USDT pairs on Binance, apply the monthly RSI gate, score survivors,
-    return the top 20 sorted best-first. Uses only free public endpoints."""
     async with httpx.AsyncClient() as client:
         symbols = await bc.get_usdt_symbols(client, min_volume_usdt)
         symbols = symbols[:max_symbols]
@@ -323,4 +304,4 @@ async def run_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300):
         "gate_failed": gate_failed_count,
         "qualified": len(passed),
         "results": top20,
-}
+  }
