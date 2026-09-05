@@ -18,6 +18,7 @@ import market_regime
 import multichain
 import dex_scanner
 import telegram_alerts
+import backtest
 
 app = FastAPI(title="Alpha Hunter Pro")
 
@@ -37,11 +38,6 @@ MEDIUM_SCORE_THRESHOLD = float(os.getenv("MEDIUM_SCORE_THRESHOLD", "50"))
 
 SCAN_INTERVAL_MINUTES = float(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
 
-# --- Market Regime Filter thresholds ---
-# If the whole crypto market is down sharply in 24h, a token's individual
-# "oversold reversal" signal is less trustworthy (it may just be falling with
-# everything else, a "falling knife"). We apply a score penalty in that case
-# rather than a hard reject — still show the token, but flag the elevated risk.
 REGIME_SEVERE_DROP_PCT = -5.0
 REGIME_MILD_DROP_PCT = -2.0
 REGIME_SEVERE_PENALTY = 10.0
@@ -63,9 +59,6 @@ def get_tier(score: float) -> str:
 
 
 async def _get_regime_adjustment():
-    """Fetch current market regime once per scan and turn it into a score
-    penalty (0 if market conditions are unremarkable). Never fails the scan —
-    falls back to 0 penalty if the regime check itself fails."""
     try:
         regime = await market_regime.get_market_regime()
     except Exception:
@@ -90,7 +83,6 @@ async def _get_regime_adjustment():
 
 
 async def perform_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300, max_per_chain: int = 10):
-    """Core scan logic — shared by the manual /api/scan endpoint and the background loop."""
     global _scan_lock_running
     if _scan_lock_running:
         return {"skipped": True, "reason": "A scan is already running"}
@@ -103,7 +95,6 @@ async def perform_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
         merged.sort(key=lambda r: r["score"], reverse=True)
         merged = merged[:20]
 
-        # --- Market Regime Filter: apply once, to every result in this scan ---
         regime_penalty, regime_summary = await _get_regime_adjustment()
         for r in merged:
             if regime_penalty:
@@ -186,6 +177,16 @@ async def health():
 @app.get("/api/market-regime")
 async def get_market_regime_endpoint():
     return await market_regime.get_market_regime()
+
+
+@app.get("/api/backtest")
+async def run_backtest_endpoint(symbol: str, days: int = 500):
+    """Browser-friendly backtest — open http://<server>/api/backtest?symbol=BTCUSDT
+    (add &days=730 for a longer window, max ~1000). No SSH needed."""
+    try:
+        return await backtest.backtest_symbol(symbol, days)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Backtest failed for {symbol.upper()}: {e}")
 
 
 @app.get("/api/multichain/trending")
