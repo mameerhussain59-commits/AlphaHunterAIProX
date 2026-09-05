@@ -19,6 +19,7 @@ import multichain
 import dex_scanner
 import telegram_alerts
 import backtest
+import outcome_tracker
 
 app = FastAPI(title="Alpha Hunter Pro")
 
@@ -130,6 +131,8 @@ async def perform_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
                 ))
             await session.commit()
 
+        await outcome_tracker.record_new_outcomes(merged, scan_id)
+
         current_high_symbols = set()
         for r in merged:
             if r["tier"] == "high":
@@ -169,6 +172,21 @@ async def background_scan_loop():
         await asyncio.sleep(SCAN_INTERVAL_MINUTES * 60)
 
 
+OUTCOME_CHECK_INTERVAL_MINUTES = 15
+
+
+async def background_outcome_check_loop():
+    """Periodically checks open outcome records against their next due
+    checkpoint (15m/1h/4h/24h/3d/7d) — see outcome_tracker.py."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            await outcome_tracker.check_pending_outcomes()
+        except Exception as e:
+            print(f"[background_outcome_check_loop] check failed: {e}")
+        await asyncio.sleep(OUTCOME_CHECK_INTERVAL_MINUTES * 60)
+
+
 @app.get("/api/health")
 async def health():
     return {"status": "ok", "time": datetime.now(timezone.utc).isoformat()}
@@ -187,6 +205,18 @@ async def run_backtest_endpoint(symbol: str, days: int = 500):
         return await backtest.backtest_symbol(symbol, days)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Backtest failed for {symbol.upper()}: {e}")
+
+
+@app.get("/api/outcomes/stats")
+async def outcomes_stats():
+    """Real (not backtested) win-rate stats from tokens actually discovered
+    and tracked for up to 7 days. Open http://<server>:8080/api/outcomes/stats"""
+    return await outcome_tracker.get_stats()
+
+
+@app.get("/api/outcomes")
+async def outcomes_list(limit: int = 50, status: str | None = None):
+    return {"results": await outcome_tracker.get_recent(limit=limit, status=status)}
 
 
 @app.get("/api/multichain/trending")
@@ -310,6 +340,7 @@ async def export_csv():
 async def on_startup():
     await init_db()
     asyncio.create_task(background_scan_loop())
+    asyncio.create_task(background_outcome_check_loop())
 
 
 if os.path.isdir("static"):
