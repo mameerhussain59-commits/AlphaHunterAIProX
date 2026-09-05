@@ -8,16 +8,20 @@ bulk). This tests the CORE IDEA behind the strategy instead:
    target 1.5R / 3R / 5R — how often would that actually have worked out
    on real historical data?"
 
-Run manually (not part of the live API):
-    cd ~/AlphaHunterAIProX/backend
-    python3 backtest.py BTCUSDT
-    python3 backtest.py ETHUSDT --days 730
+Two ways to run it:
+  1. CLI (manual, via SSH):
+       cd ~/AlphaHunterAIProX/backend
+       python3 backtest.py BTCUSDT
+       python3 backtest.py ETHUSDT --days 730
+
+  2. Browser, via the live app's API (no SSH needed):
+       http://<your-server>:8080/api/backtest?symbol=BTCUSDT
+       http://<your-server>:8080/api/backtest?symbol=SOLUSDT&days=730
 
 This is a sanity check for the strategy's core assumption, not a guarantee
 of future performance. Past results never guarantee future ones.
 """
 import asyncio
-import sys
 import argparse
 
 import httpx
@@ -87,32 +91,70 @@ def run_backtest(candles: list):
     return outcomes
 
 
-def summarize(outcomes: list):
+def summarize_dict(outcomes: list) -> dict:
+    """Same aggregation as the CLI's summarize(), but returned as JSON-friendly
+    data for the /api/backtest endpoint instead of printed to a terminal."""
     total = len(outcomes)
     if total == 0:
-        print("No qualifying setups found in this window (RSI never dropped below the gate).")
-        return
+        return {
+            "total_setups": 0,
+            "message": "No qualifying setups found in this window (RSI never dropped below the gate).",
+        }
 
     counts = {"tp1": 0, "tp2": 0, "tp3": 0, "stop": 0, "none": 0}
     for o in outcomes:
         counts[o["outcome"]] += 1
 
     wins = counts["tp1"] + counts["tp2"] + counts["tp3"]
-    win_rate = wins / total * 100
+    win_rate = round(wins / total * 100, 1)
 
-    print(f"\nTotal qualifying setups: {total}")
-    print(f"  Hit TP1 or better: {wins} ({win_rate:.1f}%)")
-    print(f"    -> TP1 only: {counts['tp1']}")
-    print(f"    -> TP2 reached: {counts['tp2']}")
-    print(f"    -> TP3 reached: {counts['tp3']}")
-    print(f"  Hit stop-loss: {counts['stop']} ({counts['stop']/total*100:.1f}%)")
-    print(f"  Neither hit within {MAX_HOLD_CANDLES} days: {counts['none']} ({counts['none']/total*100:.1f}%)")
-    print(
-        "\nReminder: this is a simplified single-timeframe approximation of the "
-        "live strategy (which also uses whale flow, security checks, and lower "
-        "timeframes). Real results will differ. Past performance never guarantees "
-        "future performance."
-    )
+    return {
+        "total_setups": total,
+        "wins_tp1_or_better": wins,
+        "win_rate_pct": win_rate,
+        "tp1_only": counts["tp1"],
+        "tp2_reached": counts["tp2"],
+        "tp3_reached": counts["tp3"],
+        "stop_loss_hit": counts["stop"],
+        "stop_loss_hit_pct": round(counts["stop"] / total * 100, 1),
+        "no_outcome_within_window": counts["none"],
+        "no_outcome_within_window_pct": round(counts["none"] / total * 100, 1),
+        "max_hold_days": MAX_HOLD_CANDLES,
+        "disclaimer": (
+            "This is a simplified single-timeframe approximation of the live strategy "
+            "(which also uses whale flow, security checks, confirmation candle, market "
+            "regime filter, and lower timeframes). Real results will differ. Past "
+            "performance never guarantees future performance."
+        ),
+    }
+
+
+def summarize(outcomes: list):
+    """CLI version — prints a human-readable report."""
+    result = summarize_dict(outcomes)
+    if result["total_setups"] == 0:
+        print(result["message"])
+        return
+
+    print(f"\nTotal qualifying setups: {result['total_setups']}")
+    print(f"  Hit TP1 or better: {result['wins_tp1_or_better']} ({result['win_rate_pct']}%)")
+    print(f"    -> TP1 only: {result['tp1_only']}")
+    print(f"    -> TP2 reached: {result['tp2_reached']}")
+    print(f"    -> TP3 reached: {result['tp3_reached']}")
+    print(f"  Hit stop-loss: {result['stop_loss_hit']} ({result['stop_loss_hit_pct']}%)")
+    print(f"  Neither hit within {result['max_hold_days']} days: {result['no_outcome_within_window']} ({result['no_outcome_within_window_pct']}%)")
+    print(f"\n{result['disclaimer']}")
+
+
+async def backtest_symbol(symbol: str, days: int = 500) -> dict:
+    """Used by the /api/backtest endpoint — fetches candles and returns the JSON summary."""
+    async with httpx.AsyncClient() as client:
+        candles = await fetch_daily_klines(client, symbol.upper(), days)
+    outcomes = run_backtest(candles)
+    result = summarize_dict(outcomes)
+    result["symbol"] = symbol.upper()
+    result["candles_fetched"] = len(candles)
+    return result
 
 
 async def main():
