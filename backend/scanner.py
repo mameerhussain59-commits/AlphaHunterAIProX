@@ -7,6 +7,9 @@ Rules (from README):
   2. Multi-timeframe analysis: Monthly -> Weekly -> Daily -> 4H -> 1H -> 15M.
   3. 100-point scoring system across the timeframes below the gate.
   4. Trade setup: Entry / Stop-Loss / 3 take-profit targets.
+  5. Confirmation candle: the most recent 15m candle should close green
+     (bounce already underway) — an unconfirmed setup is still shown but
+     scored slightly lower, since a still-falling candle is a weaker signal.
 
 Everything here runs on Binance's free public klines endpoint — no paid
 data provider, no API key.
@@ -36,6 +39,8 @@ CHAIN_ID_TO_DEXSCREENER = {
     "43114": "avalanche",
     "8453": "base",
 }
+
+CONFIRMATION_CANDLE_PENALTY = 5.0  # points deducted if the latest 15m candle hasn't closed green yet
 
 
 def _score_timeframe(df, tf: str) -> tuple[float, dict]:
@@ -94,6 +99,21 @@ def _score_timeframe(df, tf: str) -> tuple[float, dict]:
     detail["vol_ratio"] = round(float(vol_ratio), 2)
 
     return round(pts, 2), detail
+
+
+def _confirmation_candle_check(df_15m) -> dict:
+    """Is the most recent CLOSED 15m candle green (close > open)? A red
+    candle here means price is still falling at the moment of scoring — the
+    reversal hasn't visibly started yet. Not a hard reject (the bounce can
+    start on the very next candle), just a small score penalty so a
+    confirmed setup ranks above an unconfirmed one."""
+    last = df_15m.iloc[-1]
+    confirmed = bool(last["close"] > last["open"])
+    return {
+        "confirmed": confirmed,
+        "note": "latest 15m candle closed green (bounce visibly underway)" if confirmed
+        else "latest 15m candle still red — reversal not yet visibly confirmed",
+    }
 
 
 def _human_duration(hours: float) -> str:
@@ -231,6 +251,12 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
         total_score += pts
         breakdown[tf] = {"points": pts, "max": WEIGHTS[tf], **detail}
 
+    # --- Confirmation candle check (soft penalty, not a reject) ---
+    confirmation = _confirmation_candle_check(dfs["15m"])
+    if not confirmation["confirmed"]:
+        total_score = max(0, total_score - CONFIRMATION_CANDLE_PENALTY)
+    breakdown["confirmation_candle"] = confirmation
+
     base_asset = symbol[:-4] if symbol.endswith("USDT") else symbol
     try:
         chain_id, contract = await sw.find_contract(client, base_asset)
@@ -304,4 +330,4 @@ async def run_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300):
         "gate_failed": gate_failed_count,
         "qualified": len(passed),
         "results": top20,
-  }
+      }
