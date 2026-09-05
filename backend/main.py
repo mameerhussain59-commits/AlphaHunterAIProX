@@ -35,9 +35,23 @@ _previously_alerted_high_symbols = set()
 HIGH_SCORE_THRESHOLD = float(os.getenv("HIGH_SCORE_THRESHOLD", "80"))
 MEDIUM_SCORE_THRESHOLD = float(os.getenv("MEDIUM_SCORE_THRESHOLD", "50"))
 
-# How often the background scanner runs automatically, in minutes.
-# Set SCAN_INTERVAL_MINUTES=0 in .env to disable auto-scanning entirely.
 SCAN_INTERVAL_MINUTES = float(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
+
+# --- Market Regime Filter thresholds ---
+# If the whole crypto market is down sharply in 24h, a token's individual
+# "oversold reversal" signal is less trustworthy (it may just be falling with
+# everything else, a "falling knife"). We apply a score penalty in that case
+# rather than a hard reject — still show the token, but flag the elevated risk.
+REGIME_SEVERE_DROP_PCT = -5.0
+REGIME_MILD_DROP_PCT = -2.0
+REGIME_SEVERE_PENALTY = 10.0
+REGIME_MILD_PENALTY = 5.0
+
+RISK_MANAGEMENT_NOTE = (
+    "Suggested: risk no more than 1-2% of total trading capital on a single position. "
+    "Avoid opening several altcoin positions at once — most alts move together with BTC, "
+    "so multiple 'different' trades can really be one large correlated bet."
+)
 
 
 def get_tier(score: float) -> str:
@@ -46,6 +60,33 @@ def get_tier(score: float) -> str:
     elif score >= MEDIUM_SCORE_THRESHOLD:
         return "medium"
     return "low"
+
+
+async def _get_regime_adjustment():
+    """Fetch current market regime once per scan and turn it into a score
+    penalty (0 if market conditions are unremarkable). Never fails the scan —
+    falls back to 0 penalty if the regime check itself fails."""
+    try:
+        regime = await market_regime.get_market_regime()
+    except Exception:
+        return 0.0, None
+
+    penalty = 0.0
+    dominance = regime.get("dominance_and_breadth") or {}
+    change_24h = dominance.get("total_market_cap_change_24h_pct")
+    if change_24h is not None:
+        if change_24h <= REGIME_SEVERE_DROP_PCT:
+            penalty = REGIME_SEVERE_PENALTY
+        elif change_24h <= REGIME_MILD_DROP_PCT:
+            penalty = REGIME_MILD_PENALTY
+
+    summary = {
+        "total_market_cap_change_24h_pct": change_24h,
+        "regime": (regime.get("regime_classification") or {}).get("regime"),
+        "notes": (regime.get("regime_classification") or {}).get("notes"),
+        "score_penalty_applied": penalty,
+    }
+    return penalty, summary
 
 
 async def perform_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300, max_per_chain: int = 10):
@@ -62,8 +103,20 @@ async def perform_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
         merged.sort(key=lambda r: r["score"], reverse=True)
         merged = merged[:20]
 
+        # --- Market Regime Filter: apply once, to every result in this scan ---
+        regime_penalty, regime_summary = await _get_regime_adjustment()
         for r in merged:
+            if regime_penalty:
+                r["score"] = max(0, round(r["score"] - regime_penalty, 2))
             r["tier"] = get_tier(r["score"])
+            r["breakdown"]["risk_management"] = {
+                "note": RISK_MANAGEMENT_NOTE,
+                "risk_reward": {"tp1": "1.5R", "tp2": "3R", "tp3": "5R"},
+            }
+            if regime_summary:
+                r["breakdown"]["market_regime"] = regime_summary
+
+        merged.sort(key=lambda r: r["score"], reverse=True)
 
         scan_id = str(uuid.uuid4())
 
@@ -104,6 +157,7 @@ async def perform_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
             "binance_qualified": binance_result["qualified"],
             "dex_qualified": len(dex_results),
             "high_score_count": len(current_high_symbols),
+            "market_regime": regime_summary,
             "finished_at": datetime.now(timezone.utc).isoformat(),
         })
 
@@ -113,10 +167,8 @@ async def perform_scan(min_volume_usdt: float = 500_000, max_symbols: int = 300,
 
 
 async def background_scan_loop():
-    """Runs perform_scan() forever, sleeping SCAN_INTERVAL_MINUTES between runs."""
     if SCAN_INTERVAL_MINUTES <= 0:
         return
-    # Small initial delay so the app finishes starting up first.
     await asyncio.sleep(10)
     while True:
         try:
