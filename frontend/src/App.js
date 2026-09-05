@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useCallback } from "react";
 
-// Same-origin in production (backend serves this build from /static).
-// In local dev (npm start on :3000), point at the uvicorn server on :8000.
 const API_BASE = window.location.port === "3000" ? "http://localhost:8000" : "";
 
 function pumpBadgeStyle(level) {
@@ -30,7 +28,7 @@ function Badge({ text, style }) {
   );
 }
 
-export default function App() {
+function ScannerTab() {
   const [results, setResults] = useState([]);
   const [meta, setMeta] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -81,12 +79,7 @@ export default function App() {
   const timeEstimate = selected?.breakdown?.time_estimate;
 
   return (
-    <div style={styles.page}>
-      <header style={styles.header}>
-        <h1 style={styles.title}>⚡ Alpha Hunter Pro</h1>
-        <p style={styles.subtitle}>Binance Alpha Token Hunting &amp; Reversal Scanner</p>
-      </header>
-
+    <>
       <div style={styles.controls}>
         <label style={styles.label}>
           Min 24h volume (USDT)
@@ -158,9 +151,7 @@ export default function App() {
             {results.map((r) => (
               <tr key={r.symbol} onClick={() => openDetail(r)} style={styles.row}>
                 <td style={styles.tdSymbol}>{r.symbol}</td>
-                <td style={styles.td}>
-                  {r.tier && <Badge text={r.tier} style={tierBadgeStyle(r.tier)} />}
-                </td>
+                <td style={styles.td}>{r.tier && <Badge text={r.tier} style={tierBadgeStyle(r.tier)} />}</td>
                 <td style={{ ...styles.td, color: scoreColor(r.score), fontWeight: 700 }}>{r.score}</td>
                 <td style={styles.td}>
                   {(() => {
@@ -196,7 +187,9 @@ export default function App() {
               )}
             </div>
 
-            <p style={{ margin: "4px 0" }}>Score: <b>{selected.score}</b> / 100</p>
+            <p style={{ margin: "4px 0" }}>
+              Score: <b>{selected.score}</b> / 100
+            </p>
             {selected.monthly_rsi != null && <p style={{ margin: "4px 0" }}>Monthly RSI: {selected.monthly_rsi}</p>}
 
             {selected.breakdown?.contract_address && (
@@ -217,6 +210,21 @@ export default function App() {
                 </a>
               )}
             </div>
+
+            {selected.breakdown?.market_regime && (
+              <div style={{ fontSize: 12, color: "#8b949e", margin: "10px 0", padding: 8, background: "#0d1117", borderRadius: 6 }}>
+                Market regime: <b>{selected.breakdown.market_regime.regime}</b> (24h cap {selected.breakdown.market_regime.total_market_cap_change_24h_pct}%)
+                {selected.breakdown.market_regime.score_penalty_applied > 0 && (
+                  <> — score penalty: -{selected.breakdown.market_regime.score_penalty_applied}</>
+                )}
+              </div>
+            )}
+
+            {selected.breakdown?.confirmation_candle && (
+              <div style={{ fontSize: 12, color: selected.breakdown.confirmation_candle.confirmed ? "#1db954" : "#e0a808", marginBottom: 10 }}>
+                {selected.breakdown.confirmation_candle.note}
+              </div>
+            )}
 
             <h3 style={styles.sectionTitle}>Trade setup</h3>
             <table style={styles.miniTable}>
@@ -248,8 +256,10 @@ export default function App() {
                 </tr>
               </tbody>
             </table>
-            {timeEstimate?.note && (
-              <p style={{ fontSize: 11, color: "#6e7681", marginTop: 6 }}>{timeEstimate.note}</p>
+            {timeEstimate?.note && <p style={{ fontSize: 11, color: "#6e7681", marginTop: 6 }}>{timeEstimate.note}</p>}
+
+            {selected.breakdown?.risk_management?.note && (
+              <p style={{ fontSize: 11, color: "#6e7681", marginTop: 10 }}>{selected.breakdown.risk_management.note}</p>
             )}
 
             <button onClick={() => setShowRawBreakdown((v) => !v)} style={{ ...styles.linkButton, marginTop: 14 }}>
@@ -263,15 +273,180 @@ export default function App() {
           </div>
         </div>
       )}
+    </>
+  );
+}
+
+function BacktestTab() {
+  const [symbol, setSymbol] = useState("BTCUSDT");
+  const [days, setDays] = useState(500);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [history, setHistory] = useState([]);
+
+  async function runBacktest() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE}/api/backtest?symbol=${encodeURIComponent(symbol)}&days=${days}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Backtest failed");
+      setResult(data);
+      setHistory((prev) => [data, ...prev.filter((h) => h.symbol !== data.symbol)]);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function winRateColor(pct) {
+    if (pct >= 50) return "#1db954";
+    if (pct >= 30) return "#e0a800";
+    return "#c0392b";
+  }
+
+  return (
+    <>
+      <div style={styles.controls}>
+        <label style={styles.label}>
+          Symbol
+          <input
+            type="text"
+            value={symbol}
+            onChange={(e) => setSymbol(e.target.value.toUpperCase())}
+            placeholder="BTCUSDT"
+            style={styles.input}
+          />
+        </label>
+        <label style={styles.label}>
+          Days of history
+          <input type="number" value={days} onChange={(e) => setDays(Number(e.target.value))} style={styles.input} />
+        </label>
+        <button onClick={runBacktest} disabled={loading || !symbol} style={styles.button}>
+          {loading ? "Running…" : "Run Backtest"}
+        </button>
+      </div>
+
+      {error && <div style={styles.error}>{error}</div>}
+
+      {result && result.total_setups === 0 && (
+        <div style={styles.metaBar}>{result.message}</div>
+      )}
+
+      {result && result.total_setups > 0 && (
+        <div style={styles.card}>
+          <h2 style={{ marginTop: 0 }}>{result.symbol}</h2>
+          <p style={{ fontSize: 12, color: "#8b949e" }}>
+            {result.candles_fetched} daily candles tested · {result.total_setups} qualifying setups found
+          </p>
+
+          <div style={styles.statRow}>
+            <div style={styles.statBox}>
+              <div style={{ fontSize: 24, fontWeight: 800, color: winRateColor(result.win_rate_pct) }}>
+                {result.win_rate_pct}%
+              </div>
+              <div style={styles.statLabel}>Hit TP1 or better</div>
+            </div>
+            <div style={styles.statBox}>
+              <div style={{ fontSize: 24, fontWeight: 800, color: "#c0392b" }}>{result.stop_loss_hit_pct}%</div>
+              <div style={styles.statLabel}>Hit stop-loss</div>
+            </div>
+            <div style={styles.statBox}>
+              <div style={{ fontSize: 24, fontWeight: 800, color: "#8b949e" }}>{result.no_outcome_within_window_pct}%</div>
+              <div style={styles.statLabel}>No outcome ({result.max_hold_days}d)</div>
+            </div>
+          </div>
+
+          <table style={styles.miniTable}>
+            <tbody>
+              <tr>
+                <td style={styles.miniTd}>TP1 only</td>
+                <td style={styles.miniTdVal}>{result.tp1_only}</td>
+              </tr>
+              <tr>
+                <td style={styles.miniTd}>TP2 reached</td>
+                <td style={styles.miniTdVal}>{result.tp2_reached}</td>
+              </tr>
+              <tr>
+                <td style={styles.miniTd}>TP3 reached</td>
+                <td style={styles.miniTdVal}>{result.tp3_reached}</td>
+              </tr>
+              <tr>
+                <td style={styles.miniTd}>Stop-loss hit</td>
+                <td style={styles.miniTdVal}>{result.stop_loss_hit}</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <p style={{ fontSize: 11, color: "#6e7681", marginTop: 12 }}>{result.disclaimer}</p>
+        </div>
+      )}
+
+      {history.length > 1 && (
+        <>
+          <h3 style={styles.sectionTitle}>Compared so far</h3>
+          <div style={styles.tableWrap}>
+            <table style={styles.table}>
+              <thead>
+                <tr>
+                  <th style={styles.th}>Symbol</th>
+                  <th style={styles.th}>Setups</th>
+                  <th style={styles.th}>Win rate</th>
+                  <th style={styles.th}>Stop rate</th>
+                </tr>
+              </thead>
+              <tbody>
+                {history.map((h) => (
+                  <tr key={h.symbol}>
+                    <td style={styles.tdSymbol}>{h.symbol}</td>
+                    <td style={styles.td}>{h.total_setups}</td>
+                    <td style={{ ...styles.td, color: winRateColor(h.win_rate_pct), fontWeight: 700 }}>{h.win_rate_pct}%</td>
+                    <td style={styles.td}>{h.stop_loss_hit_pct}%</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+export default function App() {
+  const [tab, setTab] = useState("scanner");
+
+  return (
+    <div style={styles.page}>
+      <header style={styles.header}>
+        <h1 style={styles.title}>⚡ Alpha Hunter Pro</h1>
+        <p style={styles.subtitle}>Binance Alpha Token Hunting &amp; Reversal Scanner</p>
+      </header>
+
+      <div style={styles.tabs}>
+        <button onClick={() => setTab("scanner")} style={tab === "scanner" ? styles.tabActive : styles.tab}>
+          Scanner
+        </button>
+        <button onClick={() => setTab("backtest")} style={tab === "backtest" ? styles.tabActive : styles.tab}>
+          Backtest
+        </button>
+      </div>
+
+      {tab === "scanner" ? <ScannerTab /> : <BacktestTab />}
     </div>
   );
 }
 
 const styles = {
   page: { fontFamily: "system-ui, sans-serif", background: "#0d1117", color: "#e6edf3", minHeight: "100vh", padding: "16px" },
-  header: { marginBottom: 16 },
+  header: { marginBottom: 12 },
   title: { margin: 0, fontSize: 24 },
   subtitle: { margin: "4px 0 0", color: "#8b949e", fontSize: 13 },
+  tabs: { display: "flex", gap: 8, marginBottom: 16, borderBottom: "1px solid #30363d" },
+  tab: { padding: "8px 16px", background: "transparent", border: "none", color: "#8b949e", cursor: "pointer", fontSize: 14, fontWeight: 600, borderBottom: "2px solid transparent" },
+  tabActive: { padding: "8px 16px", background: "transparent", border: "none", color: "#e6edf3", cursor: "pointer", fontSize: 14, fontWeight: 600, borderBottom: "2px solid #238636" },
   controls: { display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap", marginBottom: 12 },
   label: { display: "flex", flexDirection: "column", fontSize: 12, color: "#8b949e" },
   input: { marginTop: 4, padding: "6px 8px", borderRadius: 6, border: "1px solid #30363d", background: "#161b22", color: "#e6edf3" },
@@ -294,4 +469,5 @@ const styles = {
   miniTdVal: { padding: "4px 6px", fontWeight: 600, borderBottom: "1px solid #21262d" },
   miniTdTime: { padding: "4px 6px", color: "#e0a808", textAlign: "right", borderBottom: "1px solid #21262d", fontSize: 12 },
   pre: { background: "#0d1117", padding: 12, borderRadius: 6, overflowX: "auto", fontSize: 12, marginTop: 8 },
-};
+  card: { border: "1px solid #30363d", borderRadius: 10, padding: 16, marginBottom: 16, background: "#161b22" },
+  statRow: { display: "
