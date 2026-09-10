@@ -5,7 +5,7 @@ point in time, which Binance's free API doesn't make practical to fetch in
 bulk). This tests the CORE IDEA behind the strategy instead:
 
   "Buy when daily RSI is oversold (<30), stop below the recent swing low,
-   target 1.5R / 3R / 5R — how often would that actually have worked out
+   target 1.2R / 2.5R / 4R — how often would that actually have worked out
    on real historical data?"
 
 Two ways to run it:
@@ -29,8 +29,8 @@ import indicators as ind
 
 RSI_GATE = 30
 SWING_LOOKBACK = 20
-MAX_HOLD_CANDLES = 30  # how many daily candles we wait for a target/stop before giving up
-ATR_STOP_MULT = 1.5
+MAX_HOLD_CANDLES = 25  # slightly shorter hold window
+ATR_STOP_MULT = 1.3   # matches improved live strategy
 
 
 async def fetch_daily_klines(client: httpx.AsyncClient, symbol: str, limit: int):
@@ -65,9 +65,10 @@ def run_backtest(candles: list):
         if risk <= 0:
             continue
 
-        tp1 = entry + risk * 1.5
-        tp2 = entry + risk * 3
-        tp3 = entry + risk * 5
+        # Matches improved live strategy targets
+        tp1 = entry + risk * 1.2
+        tp2 = entry + risk * 2.5
+        tp3 = entry + risk * 4.0
 
         outcome = "none"
         for j in range(i + 1, min(i + 1 + MAX_HOLD_CANDLES, len(df))):

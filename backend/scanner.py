@@ -1,15 +1,14 @@
 """
-Alpha Hunter Pro — scanning strategy.
+Alpha Hunter Pro — scanning strategy (Improved v2).
 
-Rules (from README):
-  1. Monthly RSI < 30 is a MANDATORY gate — token is dropped if it fails this,
-     no matter how good the lower-timeframe setup looks.
-  2. Multi-timeframe analysis: Monthly -> Weekly -> Daily -> 4H -> 1H -> 15M.
-  3. 100-point scoring system across the timeframes below the gate.
-  4. Trade setup: Entry / Stop-Loss / 3 take-profit targets.
-  5. Confirmation candle: the most recent 15m candle should close green
-     (bounce already underway) — an unconfirmed setup is still shown but
-     scored slightly lower, since a still-falling candle is a weaker signal.
+Rules:
+  1. Monthly RSI < 30 is a MANDATORY gate — token is dropped if it fails this.
+  2. Weekly RSI < 42 is a SECONDARY gate (quality filter) — reduces weak setups.
+  3. Multi-timeframe analysis: Monthly -> Weekly -> Daily -> 4H -> 1H -> 15M.
+  4. Improved 100-point scoring with higher weight on volume + momentum confirmation.
+  5. Trade setup: Entry / Stop-Loss / 3 take-profit targets (1.2R / 2.5R / 4R).
+  6. Confirmation candle: latest 15m candle should close green. Stronger penalty if not.
+  7. Prefer rising volume + improving MACD histogram on lower timeframes.
 
 Everything here runs on Binance's free public klines endpoint — no paid
 data provider, no API key.
@@ -26,6 +25,7 @@ TIMEFRAMES = ["1w", "1d", "4h", "1h", "15m"]
 WEIGHTS = {"1w": 15, "1d": 20, "4h": 15, "1h": 15, "15m": 10}
 
 MONTHLY_RSI_GATE = 30
+WEEKLY_RSI_GATE = 42          # new secondary quality gate
 CONCURRENCY = 8
 
 ENTRY_TIMING_TFS = {"1h", "15m"}
@@ -40,7 +40,7 @@ CHAIN_ID_TO_DEXSCREENER = {
     "8453": "base",
 }
 
-CONFIRMATION_CANDLE_PENALTY = 5.0  # points deducted if the latest 15m candle hasn't closed green yet
+CONFIRMATION_CANDLE_PENALTY = 10.0  # stronger penalty (was 5.0)
 
 
 def _score_timeframe(df, tf: str) -> tuple[float, dict]:
@@ -56,15 +56,16 @@ def _score_timeframe(df, tf: str) -> tuple[float, dict]:
     pts = 0.0
     detail = {}
 
-    rsi_pts = max_pts * 0.5
+    # RSI weight reduced slightly to give more room to volume + MACD confirmation
+    rsi_pts = max_pts * 0.40
 
     def _rsi_band_score(val):
         if val < 30:
             return 1.0
-        elif val < 45:
-            return 0.8
-        elif val < 55:
-            return 0.4
+        elif val < 40:
+            return 0.85
+        elif val < 50:
+            return 0.45
         return 0.1
 
     rsi_score = _rsi_band_score(r)
@@ -73,28 +74,44 @@ def _score_timeframe(df, tf: str) -> tuple[float, dict]:
     if tf in ENTRY_TIMING_TFS:
         k, d = ind.stoch_rsi(closes)
         stoch_k = float(k.iloc[-1])
+        stoch_d = float(d.iloc[-1])
         _, _, _, percent_b = ind.bollinger_bands(closes)
         pb = float(percent_b.iloc[-1])
-        stoch_score = 1.0 if stoch_k < 20 else (0.7 if stoch_k < 40 else 0.2)
-        bb_score = 1.0 if pb < 0.1 else (0.7 if pb < 0.3 else (0.3 if pb < 0.6 else 0.1))
+        # Prefer Stoch RSI turning up from oversold
+        stoch_score = 1.0 if (stoch_k < 25 and stoch_k >= stoch_d) else (0.75 if stoch_k < 35 else 0.25)
+        bb_score = 1.0 if pb < 0.15 else (0.7 if pb < 0.35 else (0.3 if pb < 0.6 else 0.1))
         rsi_score = (rsi_score + stoch_score + bb_score) / 3
         detail["stoch_rsi_k"] = round(stoch_k, 2)
+        detail["stoch_rsi_d"] = round(stoch_d, 2)
         detail["bb_percent_b"] = round(pb, 3)
 
     pts += rsi_pts * rsi_score
 
-    macd_pts = max_pts * 0.3
+    # MACD: stronger reward for actual bullish crossover / rising histogram
+    macd_pts = max_pts * 0.30
     if hist_last > 0 and hist_prev <= 0:
-        macd_score = 1.0
+        macd_score = 1.0          # fresh bullish cross
+    elif hist_last > hist_prev and hist_last > 0:
+        macd_score = 0.85         # already positive and rising
     elif hist_last > hist_prev:
-        macd_score = 0.6
+        macd_score = 0.55         # rising but still negative
     else:
-        macd_score = 0.2
+        macd_score = 0.15
     pts += macd_pts * macd_score
+    detail["macd_hist"] = round(float(hist_last), 6)
 
-    vol_pts = max_pts * 0.2
+    # Volume weight increased (was 0.2 → 0.30)
+    vol_pts = max_pts * 0.30
     vol_ratio = (vol_last / vol_avg) if vol_avg else 1.0
-    vol_score = min(vol_ratio / 1.5, 1.0)
+    # Require clearer volume expansion for full points
+    if vol_ratio >= 1.8:
+        vol_score = 1.0
+    elif vol_ratio >= 1.3:
+        vol_score = 0.75
+    elif vol_ratio >= 1.0:
+        vol_score = 0.45
+    else:
+        vol_score = 0.15
     pts += vol_pts * vol_score
     detail["vol_ratio"] = round(float(vol_ratio), 2)
 
@@ -149,14 +166,17 @@ def _build_trade_setup(df_1h, df_4h):
     entry = float(df_1h["close"].iloc[-1])
     atr_1h = float(ind.atr(df_1h).iloc[-1])
     low = ind.swing_low(df_4h, lookback=20)
-    stop_loss = min(low, entry - atr_1h * 1.5)
+    # Slightly tighter ATR stop (1.3x instead of 1.5x) for better R:R
+    stop_loss = min(low, entry - atr_1h * 1.3)
     risk = entry - stop_loss
     if risk <= 0:
-        risk = entry * 0.02
+        risk = entry * 0.015
         stop_loss = entry - risk
-    tp1 = entry + risk * 1.5
-    tp2 = entry + risk * 3
-    tp3 = entry + risk * 5
+
+    # More realistic targets based on backtest feedback
+    tp1 = entry + risk * 1.2   # was 1.5 — more achievable
+    tp2 = entry + risk * 2.5   # was 3.0
+    tp3 = entry + risk * 4.0   # was 5.0
 
     time_estimate = _estimate_time_to_targets(atr_1h, entry, tp1, tp2, tp3)
 
@@ -166,6 +186,7 @@ def _build_trade_setup(df_1h, df_4h):
         "tp1": round(tp1, 8),
         "tp2": round(tp2, 8),
         "tp3": round(tp3, 8),
+        "risk_reward": {"tp1": 1.2, "tp2": 2.5, "tp3": 4.0},
     }, time_estimate
 
 
@@ -244,8 +265,22 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
 
     dfs = {tf: ind.to_df(frames[tf]) for tf in TIMEFRAMES}
 
+    # --- Secondary quality gate: Weekly RSI ---
+    w_rsi = float(ind.rsi(dfs["1w"]["close"]).iloc[-1])
+    if w_rsi >= WEEKLY_RSI_GATE:
+        return {
+            "symbol": symbol,
+            "passed_gate": False,
+            "monthly_rsi": round(m_rsi, 2),
+            "weekly_rsi": round(w_rsi, 2),
+            "reason": "weekly_rsi_too_high",
+        }
+
     total_score = 0.0
-    breakdown = {"monthly_rsi": round(m_rsi, 2)}
+    breakdown = {
+        "monthly_rsi": round(m_rsi, 2),
+        "weekly_rsi": round(w_rsi, 2),
+    }
     for tf in TIMEFRAMES:
         pts, detail = _score_timeframe(dfs[tf], tf)
         total_score += pts
