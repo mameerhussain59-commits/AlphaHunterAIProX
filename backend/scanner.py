@@ -22,7 +22,11 @@ import security_whale as sw
 
 TIMEFRAMES = ["1w", "1d", "4h", "1h", "15m"]
 
-WEIGHTS = {"1w": 15, "1d": 20, "4h": 15, "1h": 15, "15m": 10}
+# --- Locked 100-point scoring weights (v2 — unified design) ---
+# Monthly RSI(20) + Weekly(15) + Daily(15) + 4H(10) + 1H(10) + 15M(5)
+#   + Smart Money/Whale(15) + Security(10) = 100
+MONTHLY_RSI_WEIGHT = 20
+WEIGHTS = {"1w": 15, "1d": 15, "4h": 10, "1h": 10, "15m": 5}
 
 MONTHLY_RSI_GATE = 30
 WEEKLY_RSI_GATE = 42          # new secondary quality gate
@@ -43,6 +47,26 @@ CHAIN_ID_TO_DEXSCREENER = {
 CONFIRMATION_CANDLE_PENALTY = 10.0  # stronger penalty (was 5.0)
 
 
+def _rsi_band_score(val: float) -> float:
+    if val < 30:
+        return 1.0
+    elif val < 40:
+        return 0.85
+    elif val < 50:
+        return 0.45
+    return 0.1
+
+
+def _score_monthly(df_monthly) -> tuple[float, dict]:
+    """Monthly RSI already gates entry (<30 mandatory) — this awards the
+    20-point Monthly RSI weight itself, scaled by how deep into oversold
+    territory the reading is (deeper oversold = stronger reversal setup)."""
+    r = float(ind.rsi(df_monthly["close"]).iloc[-1])
+    score = _rsi_band_score(r)
+    pts = round(MONTHLY_RSI_WEIGHT * score, 2)
+    return pts, {"points": pts, "max": MONTHLY_RSI_WEIGHT, "rsi": round(r, 2)}
+
+
 def _score_timeframe(df, tf: str) -> tuple[float, dict]:
     max_pts = WEIGHTS[tf]
     closes = df["close"]
@@ -58,15 +82,6 @@ def _score_timeframe(df, tf: str) -> tuple[float, dict]:
 
     # RSI weight reduced slightly to give more room to volume + MACD confirmation
     rsi_pts = max_pts * 0.40
-
-    def _rsi_band_score(val):
-        if val < 30:
-            return 1.0
-        elif val < 40:
-            return 0.85
-        elif val < 50:
-            return 0.45
-        return 0.1
 
     rsi_score = _rsi_band_score(r)
     detail["rsi"] = round(float(r), 2)
@@ -276,10 +291,12 @@ async def analyze_symbol(client: httpx.AsyncClient, symbol: str, volume_24h: flo
             "reason": "weekly_rsi_too_high",
         }
 
-    total_score = 0.0
+    monthly_pts, monthly_detail = _score_monthly(df_monthly)
+    total_score = monthly_pts
     breakdown = {
         "monthly_rsi": round(m_rsi, 2),
         "weekly_rsi": round(w_rsi, 2),
+        "monthly": monthly_detail,
     }
     for tf in TIMEFRAMES:
         pts, detail = _score_timeframe(dfs[tf], tf)

@@ -39,10 +39,8 @@ MEDIUM_SCORE_THRESHOLD = float(os.getenv("MEDIUM_SCORE_THRESHOLD", "50"))
 
 SCAN_INTERVAL_MINUTES = float(os.getenv("SCAN_INTERVAL_MINUTES", "5"))
 
-REGIME_SEVERE_DROP_PCT = -5.0
-REGIME_MILD_DROP_PCT = -2.0
-REGIME_SEVERE_PENALTY = 10.0
-REGIME_MILD_PENALTY = 5.0
+# Regime penalties now come from market_regime.REGIME_PENALTIES (locked
+# scoring system v2: RISK_OFF -15 / BTC_SEASON -8 / TRANSITION -3 / ALTSEASON 0)
 
 RISK_MANAGEMENT_NOTE = (
     "Suggested: risk no more than 1-2% of total trading capital on a single position. "
@@ -65,19 +63,15 @@ async def _get_regime_adjustment():
     except Exception:
         return 0.0, None
 
-    penalty = 0.0
     dominance = regime.get("dominance_and_breadth") or {}
-    change_24h = dominance.get("total_market_cap_change_24h_pct")
-    if change_24h is not None:
-        if change_24h <= REGIME_SEVERE_DROP_PCT:
-            penalty = REGIME_SEVERE_PENALTY
-        elif change_24h <= REGIME_MILD_DROP_PCT:
-            penalty = REGIME_MILD_PENALTY
+    classification_v2 = regime.get("regime_classification_v2") or {}
+    penalty = float(classification_v2.get("score_penalty", 0.0))
 
     summary = {
-        "total_market_cap_change_24h_pct": change_24h,
-        "regime": (regime.get("regime_classification") or {}).get("regime"),
-        "notes": (regime.get("regime_classification") or {}).get("notes"),
+        "total_market_cap_change_24h_pct": dominance.get("total_market_cap_change_24h_pct"),
+        "btc_dominance_pct": dominance.get("btc_dominance_pct"),
+        "regime": classification_v2.get("regime"),
+        "notes": classification_v2.get("notes"),
         "score_penalty_applied": penalty,
     }
     return penalty, summary

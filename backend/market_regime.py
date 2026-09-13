@@ -92,6 +92,67 @@ async def get_realized_volatility(client: httpx.AsyncClient, symbol: str = "BTCU
         return None
 
 
+REGIME_PENALTIES = {
+    "RISK_OFF": 15,
+    "BTC_SEASON": 8,
+    "TRANSITION": 3,
+    "ALTSEASON": 0,
+}
+
+
+def classify_regime_v2(dominance, btc_futures, btc_vol):
+    """Unified 4-regime classification (locked scoring system v2) — combines
+    dominance, open-interest/liquidation proxy, and realized volatility into
+    ONE labeled regime with its own fixed score penalty, instead of scoring
+    each signal separately. Checked in priority order: a RISK_OFF condition
+    always wins even if dominance would otherwise say BTC_SEASON/ALTSEASON.
+
+      RISK_OFF    — market cap -5%+ in 24h, OR OI dropped 15%+ (liquidation
+                    flush), OR BTC realized volatility > 70% annualized
+      BTC_SEASON  — BTC dominance > 55% (and not RISK_OFF)
+      TRANSITION  — BTC dominance 45-55%, OR a milder 2-5% market cap drop
+      ALTSEASON   — BTC dominance < 45%, no risk-off signals (baseline, 0 penalty)
+    """
+    notes = []
+    btc_dom = (dominance or {}).get("btc_dominance_pct")
+    mcap_chg = (dominance or {}).get("total_market_cap_change_24h_pct")
+    oi_chg = (btc_futures or {}).get("oi_change_24h_pct")
+
+    is_severe_drop = mcap_chg is not None and mcap_chg <= -5
+    is_liq_flush = oi_chg is not None and oi_chg <= -15
+    is_high_vol = btc_vol is not None and btc_vol > 70
+
+    if is_severe_drop or is_liq_flush or is_high_vol:
+        regime = "RISK_OFF"
+        if is_severe_drop:
+            notes.append(f"Market cap dropped {mcap_chg}% in 24h — risk-off conditions")
+        if is_liq_flush:
+            notes.append(f"BTC open interest dropped {oi_chg}% — consistent with a liquidation flush")
+        if is_high_vol:
+            notes.append(f"BTC realized volatility very high ({btc_vol}% annualized)")
+    elif btc_dom is not None and btc_dom > 55:
+        regime = "BTC_SEASON"
+        notes.append(f"BTC dominance high ({btc_dom}%) — capital concentrated in BTC, alts likely underperform")
+    elif (btc_dom is not None and 45 <= btc_dom <= 55) or (mcap_chg is not None and -5 < mcap_chg <= -2):
+        regime = "TRANSITION"
+        if btc_dom is not None and 45 <= btc_dom <= 55:
+            notes.append(f"BTC dominance mid-range ({btc_dom}%) — no clear alt or BTC bias")
+        if mcap_chg is not None and -5 < mcap_chg <= -2:
+            notes.append(f"Market cap down {mcap_chg}% in 24h — mild risk-off pressure")
+    else:
+        regime = "ALTSEASON"
+        if btc_dom is not None:
+            notes.append(f"BTC dominance low ({btc_dom}%) — historically associated with altseason conditions")
+        else:
+            notes.append("No strong risk-off or BTC-dominance signal detected")
+
+    return {
+        "regime": regime,
+        "score_penalty": REGIME_PENALTIES[regime],
+        "notes": notes,
+    }
+
+
 def classify_regime(dominance, btc_funding_oi, btc_vol):
     """Simple, transparent rules — not a black box:
       - BTC dominance high/low hints at BTC-favored vs alt-favored conditions
@@ -143,6 +204,7 @@ async def get_market_regime():
         btc_vol = await get_realized_volatility(client, "BTCUSDT")
 
     classification = classify_regime(dominance, btc_futures, btc_vol)
+    classification_v2 = classify_regime_v2(dominance, btc_futures, btc_vol)
 
     return {
         "dominance_and_breadth": dominance,
@@ -150,5 +212,6 @@ async def get_market_regime():
         "eth_futures": eth_futures,
         "btc_realized_volatility_annualized_pct": btc_vol,
         "regime_classification": classification,
+        "regime_classification_v2": classification_v2,
         "note": "Liquidations are approximated via 24h open-interest change (no free exact liquidation feed exists). Descriptive market context, not a trading signal.",
   }
